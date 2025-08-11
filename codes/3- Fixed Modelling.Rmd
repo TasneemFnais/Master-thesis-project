@@ -1,0 +1,1180 @@
+---
+title: "Fixed Modelling"
+author: "Tesneem Fnais"
+date: "2025-07-25"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+train_data <- read.csv("train_data_final.csv")
+test_data <-  read.csv("test_data_final.csv")
+```
+
+#===============================================================================
+
+
+
+#------------------------------------- EDA -------------------------------------
+
+
+```{r}
+colnames(train_data)
+
+str(train_data)
+```
+
+
+```{r}
+# ---------------------- Group-wise Summary ----------------------
+group_summary <- train_data %>%
+  group_by(heartoa) %>%
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE))) %>%
+  t() %>%
+  as.data.frame()
+
+# Fix row and column names
+colnames(group_summary) <- group_summary[1, ]  # Set OA / no_OA as column names
+group_summary <- group_summary[-1, ]           # Remove redundant row
+group_summary <- mutate_all(group_summary, as.numeric)
+group_summary$variable <- rownames(group_summary)
+
+# ---------------------- Calculate Difference ----------------------
+group_summary <- group_summary %>%
+  mutate(difference = OA - no_OA) %>%
+  arrange(desc(abs(difference)))
+
+# ---------------------- View Top Differences ----------------------
+print(group_summary)
+
+write.csv(group_summary, "group_summary.csv", row.names = FALSE)
+```
+
+# train set 
+```{r}
+# Convert outcome to factor
+train_data$heartoa <- factor(train_data$heartoa, levels = c("no_OA", "OA"))
+
+
+# Leave continuous variables as-is
+# grip_mean and age are already numeric/int
+train_data <- train_data %>%
+  mutate(age = as.numeric(age),
+         grip_mean = as.numeric(grip_mean))
+
+
+
+# Convert binary variables to factors
+binary_vars <- c(
+  "hepawkn", "hepawba", "hepawhi", "hepawfe", "hepawot",
+  "hemobch", "hemobcs", "hemobcl", "hemobpi", "hemobpu",
+  "hemobwa", "hemobre", "hemobsi", "hemobst", "headlba",
+  "headlbe", "headldr", "mmpain", "sex", "headlsh", "headlwc"
+)
+train_data[binary_vars] <- lapply(train_data[binary_vars], factor)
+
+
+# Convert ordinal variables to ordered factors
+ordinal_vars <- c("hehelf", "hepaa")
+train_data[ordinal_vars] <- lapply(train_data[ordinal_vars], function(x) {
+  factor(x, ordered = TRUE)
+})
+
+str(train_data)
+```
+
+# test set
+```{r}
+# 1. Convert outcome to factor
+test_data$heartoa <- factor(test_data$heartoa, levels = c("no_OA", "OA"))
+
+# 2. Ensure continuous variables are numeric
+test_data <- test_data %>%
+  mutate(
+    age = as.numeric(age),
+    grip_mean = as.numeric(grip_mean)
+  )
+
+# 3. Convert binary variables to factors (with matching levels from train_data)
+binary_vars <- c(
+  "hepawkn", "hepawba", "hepawhi", "hepawfe", "hepawot",
+  "hemobch", "hemobcs", "hemobcl", "hemobpi", "hemobpu",
+  "hemobwa", "hemobre", "hemobsi", "hemobst", "headlba",
+  "headlbe", "headldr", "mmpain", "sex", "headlsh", "headlwc"
+)
+
+test_data[binary_vars] <- lapply(binary_vars, function(var) {
+  factor(as.character(test_data[[var]]), levels = levels(train_data[[var]]))
+})
+
+# 4. Convert ordinal variables to ordered factors (with matching levels from train_data)
+ordinal_vars <- c("hehelf", "hepaa")
+
+test_data[ordinal_vars] <- lapply(ordinal_vars, function(var) {
+  factor(as.character(test_data[[var]]), levels = levels(train_data[[var]]), ordered = TRUE)
+})
+
+# 5. Inspect structure
+str(test_data)
+```
+
+
+
+#===============================================================================
+
+
+# ------------------------------ Data Preparation ------------------------------
+# ========== Logistic Regression 
+
+
+```{r}
+# ---------------------- 1. Load Required Libraries ----------------------
+library(caret)
+library(pROC)
+
+# ---------------------- 2. Ensure Outcome is a Factor ----------------------
+train_data$heartoa <- factor(train_data$heartoa, levels = c("no_OA", "OA"))
+test_data$heartoa  <- factor(test_data$heartoa, levels = c("no_OA", "OA"))
+
+# ---------------------- 3. Define Continuous Variables ----------------------
+continuous_vars_LR <- c("age", "grip_mean")
+
+# ---------------------- 4. Create LR-Specific Datasets ----------------------
+train_data_LR <- train_data
+test_data_LR  <- test_data
+
+# -------------- 5. Create Scaling Parameters from Training Data -------------
+scale_params <- preProcess(train_data_LR[, continuous_vars_LR], method = c("center", "scale"))
+
+# ---------------------- 6. Apply Scaling ----------------------
+train_data_LR[, continuous_vars_LR] <- predict(scale_params, train_data_LR[, continuous_vars_LR])
+test_data_LR[, continuous_vars_LR]  <- predict(scale_params, test_data_LR[, continuous_vars_LR])
+
+# ---------------------- 6. Confirm Scaling Worked ----------------------
+#summary(train_data[, continuous_vars_LR])
+#summary(test_data[, continuous_vars_LR])
+#str(train_data_LR)
+#str(test_data_LR)
+```
+
+
+
+#----------------------------------- CV only -----------------------------------
+```{r}
+# --------------- 1. Load Libraries ---------------
+library(caret)
+library(e1071)      # For confusionMatrix
+library(MLmetrics)  # For Accuracy, Precision, Recall, F1
+library(pROC)       # For AUC
+
+# --------------- 2. Cross-Validation Setup ---------------
+ctrl_LR <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# --------------- 3. Train Logistic Regression ---------------
+set.seed(123)
+model_logit_LR <- train(
+  heartoa ~ .,
+  data = train_data_LR,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl_LR,
+  metric = "ROC"
+)
+
+# --------------- 4. Get Train AUC from Cross-Validation ----------------------
+train_auc_LR <- mean(model_logit_LR$resample$ROC)
+
+# --------------- 5. Predict on Test Set ---------------
+# Predict probabilities
+probs_test_LR <- predict(model_logit_LR, newdata = test_data_LR, type = "prob")
+
+# Apply custom threshold
+threshold <- 0.35
+pred_test_LR <- factor(ifelse(probs_test_LR$OA > threshold, "OA", "no_OA"), levels = c("no_OA", "OA"))
+
+# Ground truth
+truth_LR <- test_data_LR$heartoa
+
+# --------------- 6. Evaluation Metrics ----------------------
+# Confusion matrix
+cm_LR <- confusionMatrix(pred_test_LR, truth_LR, positive = "OA")
+
+# Overall metrics
+accuracy_LR    <- Accuracy(y_pred = pred_test_LR, y_true = truth_LR)
+roc_obj_LR     <- roc(response = truth_LR, predictor = probs_test_LR$OA, levels = c("no_OA", "OA"))
+auc_test_LR    <- auc(roc_obj_LR)
+
+# Extract values
+TP <- cm_LR$table["OA", "OA"]
+TN <- cm_LR$table["no_OA", "no_OA"]
+FP <- cm_LR$table["OA", "no_OA"]
+FN <- cm_LR$table["no_OA", "OA"]
+
+# Manual per-class metrics
+# OA class (positive)
+precision_OA <- TP / (TP + FP)           # Precision
+recall_OA    <- TP / (TP + FN)           # Sensitivity
+f1_OA        <- 2 * precision_OA * recall_OA / (precision_OA + recall_OA)
+
+# no_OA class (negative)
+npv_no_OA    <- TN / (TN + FN)           # NPV
+specificity  <- TN / (TN + FP)           # Specificity
+f1_no_OA     <- 2 * npv_no_OA * specificity / (npv_no_OA + specificity)
+
+# --------------- 7. Print Results ----------------------
+cat(" Logistic Regression Evaluation @ Threshold 0.35\n")
+cat("----------------------------------------------------\n")
+cat("Accuracy        :", round(accuracy_LR, 3 ),"\n")
+cat("AUC (Test)      :", round(auc_test_LR, 3), "\n")
+cat("AUC (Train/CV)  :", round(train_auc_LR, 3), "\n\n")
+
+cat("Confusion Matrix:\n")
+print(cm_LR$table)
+
+cat("\n Per-Class Evaluation (Manual Calculation):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA, 3), "\n")
+cat("  Recall (Sensitivity) :", round(recall_OA, 3), "\n")
+cat("  F1 Score             :", round(f1_OA, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA, 3), "\n")
+cat("  Specificity (Recall)  :", round(specificity, 3), "\n")
+cat("  F1 Score              :", round(f1_no_OA, 3), "\n")
+```
+
+
+
+# --------------------------------- Upsampling ---------------------------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+library(DescTools)
+
+# ---------------------- 2. Upsample Training Data ----------------------
+set.seed(123)
+train_data_LR_up <- upSample(
+  x = train_data_LR[, setdiff(names(train_data_LR), "heartoa")],
+  y = train_data_LR$heartoa,
+  yname = "heartoa"
+)
+
+# ---------------------- 3. 10-Fold CV Setup ----------------------
+ctrl_LR_up <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 4. Train Logistic Regression ----------------------
+set.seed(123)
+model_logit_LR_up <- train(
+  heartoa ~ .,
+  data = train_data_LR_up,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl_LR_up,
+  metric = "ROC"
+)
+
+# ---------------------- 5. Get Train AUC from Cross-Validation ----------------------
+train_auc_LR_up <- mean(model_logit_LR_up$resample$ROC)
+
+# ---------------------- 6. Predict on Test Set ----------------------
+probs_test_LR_up <- predict(model_logit_LR_up, newdata = test_data_LR, type = "prob")
+threshold <- 0.4
+pred_test_LR_up <- factor(ifelse(probs_test_LR_up$OA > threshold, "OA", "no_OA"), levels = c("no_OA", "OA"))
+truth_LR_up <- test_data_LR$heartoa
+
+# ---------------------- 7. Evaluation Metrics ----------------------
+# Confusion Matrix
+cm_LR_up <- confusionMatrix(pred_test_LR_up, truth_LR_up, positive = "OA")
+
+# Overall Accuracy
+accuracy_LR_up <- Accuracy(y_pred = pred_test_LR_up, y_true = truth_LR_up)
+
+# AUC and CI
+roc_obj_LR_up  <- roc(response = truth_LR_up, predictor = probs_test_LR_up$OA, levels = c("no_OA", "OA"))
+auc_test_LR_up <- auc(roc_obj_LR_up)
+ci_auc_up <- ci.auc(roc_obj_LR_up, conf.level = 0.95)
+
+# Extract Confusion Matrix Components
+TP_up <- cm_LR_up$table["OA", "OA"]
+TN_up <- cm_LR_up$table["no_OA", "no_OA"]
+FP_up <- cm_LR_up$table["OA", "no_OA"]
+FN_up <- cm_LR_up$table["no_OA", "OA"]
+P_up <- TP_up + FN_up
+N_up <- TN_up + FP_up
+
+# Class Metrics
+precision_OA_up <- TP_up / (TP_up + FP_up)
+recall_OA_up    <- TP_up / (TP_up + FN_up)
+f1_OA_up        <- 2 * precision_OA_up * recall_OA_up / (precision_OA_up + recall_OA_up)
+
+precision_no_OA_up <- TN_up / (TN_up + FN_up)
+recall_no_OA_up    <- TN_up / (TN_up + FP_up)
+f1_no_OA_up        <- 2 * precision_no_OA_up * recall_no_OA_up / (precision_no_OA_up + recall_no_OA_up)
+
+# ---------------------- 8. Confidence Intervals ----------------------
+ci_sens_up     <- BinomCI(x = TP_up, n = P_up, conf.level = 0.95, method = "wilson")
+ci_spec_up     <- BinomCI(x = TN_up, n = N_up, conf.level = 0.95, method = "wilson")
+ci_prec_OA_up  <- BinomCI(x = TP_up, n = TP_up + FP_up, conf.level = 0.95, method = "wilson")
+ci_npv_up      <- BinomCI(x = TN_up, n = TN_up + FN_up, conf.level = 0.95, method = "wilson")
+ci_acc_up      <- BinomCI(x = TP_up + TN_up, n = P_up + N_up, conf.level = 0.95, method = "wilson")
+
+# ---------------------- 9. Print Results ----------------------
+cat("Logistic Regression (Upsampled) Evaluation @ Threshold 0.4\n")
+cat("--------------------------------------------------------------\n")
+cat("Accuracy        :", round(accuracy_LR_up, 3),
+    " (95% CI:", paste0(round(ci_acc_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("AUC (Train CV)  :", round(train_auc_LR_up, 3), "\n")
+cat("AUC (Test Set)  :", round(auc_test_LR_up, 3),
+    "(95% CI:", paste0(round(ci_auc_up[2:3], 3), collapse = "–"), ")\n\n")
+
+cat("Confusion Matrix:\n")
+print(cm_LR_up$table)
+
+cat("\n Per-Class Evaluation (with 95% CI):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_up, 3),
+    " (95% CI:", paste0(round(ci_prec_OA_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_up, 3),
+    " (95% CI:", paste0(round(ci_sens_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  F1 Score             :", round(f1_OA_up, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(precision_no_OA_up, 3),
+    " (95% CI:", paste0(round(ci_npv_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  Specificity (Recall)  :", round(recall_no_OA_up, 3),
+    " (95% CI:", paste0(round(ci_spec_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  F1 Score              :", round(f1_no_OA_up, 3), "\n")
+```
+
+
+
+# -------------------------------- Downsampling --------------------------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+
+# ---------------------- 2. Downsample Training Data ----------------------
+set.seed(123)
+train_data_LR_down <- downSample(
+  x = train_data_LR[, setdiff(names(train_data_LR), "heartoa")],
+  y = train_data_LR$heartoa,
+  yname = "heartoa"
+)
+
+# ---------------------- 3. 10-Fold CV Setup ----------------------
+ctrl_LR_down <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 4. Train Logistic Regression ----------------------
+set.seed(123)
+model_logit_LR_down <- train(
+  heartoa ~ .,
+  data = train_data_LR_down,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl_LR_down,
+  metric = "ROC"
+)
+
+# ---------------------- 5. Predict on Test Set ----------------------
+# Probabilities
+probs_test_LR_down <- predict(model_logit_LR_down, newdata = test_data_LR, type = "prob")
+
+# Class prediction using threshold 0.45
+threshold <- 0.45
+pred_test_LR_down <- factor(ifelse(probs_test_LR_down$OA > threshold, "OA", "no_OA"), levels = c("no_OA", "OA"))
+
+# True labels
+truth_LR_down <- test_data_LR$heartoa
+
+# ---------------------- 6. Confusion Matrix & Evaluation ----------------------
+# Confusion Matrix
+cm_LR_down <- confusionMatrix(pred_test_LR_down, truth_LR_down, positive = "OA")
+
+# Overall Metrics
+accuracy_LR_down    <- Accuracy(y_pred = pred_test_LR_down, y_true = truth_LR_down)
+roc_obj_LR_down     <- roc(response = truth_LR_down, predictor = probs_test_LR_down$OA, levels = c("no_OA", "OA"))
+auc_LR_down         <- auc(roc_obj_LR_down)
+train_auc_LR_down   <- mean(model_logit_LR_down$resample$ROC)  # Train AUC from CV
+
+# Confusion matrix values
+TP_down <- cm_LR_down$table["OA", "OA"]
+TN_down <- cm_LR_down$table["no_OA", "no_OA"]
+FP_down <- cm_LR_down$table["OA", "no_OA"]
+FN_down <- cm_LR_down$table["no_OA", "OA"]
+
+# OA class (positive)
+precision_OA_down <- TP_down / (TP_down + FP_down)
+recall_OA_down    <- TP_down / (TP_down + FN_down)
+f1_OA_down        <- 2 * precision_OA_down * recall_OA_down / (precision_OA_down + recall_OA_down)
+
+# no_OA class (negative)
+npv_no_OA_down         <- TN_down / (TN_down + FN_down)
+specificity_no_OA_down <- TN_down / (TN_down + FP_down)
+f1_no_OA_down          <- 2 * npv_no_OA_down * specificity_no_OA_down / (npv_no_OA_down + specificity_no_OA_down)
+
+# ---------------------- 7. Print Results ----------------------
+cat("Overall Evaluation (Downsampled Logistic Regression @ Threshold 0.45):\n")
+cat("Accuracy       :", round(accuracy_LR_down, 3), "\n")
+cat("AUC (Test)     :", round(auc_LR_down, 3), "\n")
+cat("AUC (Train/CV) :", round(train_auc_LR_down, 3), "\n\n")
+
+cat(" Confusion Matrix:\n")
+print(cm_LR_down$table)
+
+cat("\n Per-Class Evaluation (Manual Calculation):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_down, 3), "\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_down, 3), "\n")
+cat("  F1 Score             :", round(f1_OA_down, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA_down, 3), "\n")
+cat("  Specificity (Recall)  :", round(specificity_no_OA_down, 3), "\n")
+cat("  F1 Score              :", round(f1_no_OA_down, 3), "\n")
+```
+
+
+
+# ------------ Threshold and Hyperparameter Tuning for Upsampled ------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(glmnet)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+
+# ---------------------- 2. Upsample Training Data ----------------------
+set.seed(456)
+train_data_LR_tune_up <- upSample(
+  x = train_data_LR[, setdiff(names(train_data_LR), "heartoa")],
+  y = train_data_LR$heartoa,
+  yname = "heartoa"
+)
+
+# ---------------------- 3. 10-Fold CV Setup ----------------------
+ctrl_LR_tune_up <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 4. Define Hyperparameter Grid ----------------------
+tune_grid_LR_tune_up <- expand.grid(
+  alpha = c(0, 0.5, 1),
+  lambda = 10^seq(-3, 1, length = 10)
+)
+
+# ---------------------- 5. Train Regularized Logistic Regression ----------------------
+set.seed(456)
+model_logit_LR_tune_up <- train(
+  heartoa ~ .,
+  data = train_data_LR_tune_up,
+  method = "glmnet",
+  family = "binomial",
+  metric = "ROC",
+  tuneGrid = tune_grid_LR_tune_up,
+  trControl = ctrl_LR_tune_up
+)
+
+# ---------------------- 6. Predict on Test Set with Custom Threshold ----------------------
+threshold_LR_tune_up <- 0.45
+probs_test_LR_tune_up <- predict(model_logit_LR_tune_up, newdata = test_data_LR, type = "prob")
+pred_test_LR_tune_up <- factor(
+  ifelse(probs_test_LR_tune_up$OA > threshold_LR_tune_up, "OA", "no_OA"),
+  levels = c("no_OA", "OA")
+)
+truth_LR_tune_up <- test_data_LR$heartoa
+
+# ---------------------- 7. Confusion Matrix & Metrics ----------------------
+cm_LR_tune_up <- confusionMatrix(pred_test_LR_tune_up, truth_LR_tune_up, positive = "OA")
+
+accuracy_LR_tune_up <- Accuracy(pred_test_LR_tune_up, truth_LR_tune_up)
+roc_obj_LR_tune_up  <- roc(response = truth_LR_tune_up, predictor = probs_test_LR_tune_up$OA, levels = c("no_OA", "OA"))
+auc_LR_tune_up      <- auc(roc_obj_LR_tune_up)
+train_auc_LR_tune_up <- mean(model_logit_LR_tune_up$resample$ROC)
+
+# Confusion matrix values
+TP_tune_up <- cm_LR_tune_up$table["OA", "OA"]
+TN_tune_up <- cm_LR_tune_up$table["no_OA", "no_OA"]
+FP_tune_up <- cm_LR_tune_up$table["OA", "no_OA"]
+FN_tune_up <- cm_LR_tune_up$table["no_OA", "OA"]
+
+# OA class (positive)
+precision_OA_tune_up <- TP_tune_up / (TP_tune_up + FP_tune_up)
+recall_OA_tune_up    <- TP_tune_up / (TP_tune_up + FN_tune_up)
+f1_OA_tune_up        <- 2 * precision_OA_tune_up * recall_OA_tune_up / (precision_OA_tune_up + recall_OA_tune_up)
+
+# no_OA class (negative)
+npv_no_OA_tune_up         <- TN_tune_up / (TN_tune_up + FN_tune_up)
+specificity_no_OA_tune_up <- TN_tune_up / (TN_tune_up + FP_tune_up)
+f1_no_OA_tune_up          <- 2 * npv_no_OA_tune_up * specificity_no_OA_tune_up / (npv_no_OA_tune_up + specificity_no_OA_tune_up)
+
+# ---------------------- 8. Print Results ----------------------
+cat(" Overall Evaluation (Tuned Logistic Regression - Upsampled + Threshold 0.45):\n")
+cat("Accuracy       :", round(accuracy_LR_tune_up, 3), "\n")
+cat("AUC (Test)     :", round(auc_LR_tune_up, 3), "\n")
+cat("AUC (Train/CV) :", round(train_auc_LR_tune_up, 3), "\n\n")
+
+cat(" Confusion Matrix:\n")
+print(cm_LR_tune_up$table)
+
+cat("\n Per-Class Evaluation (Manual Calculation):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_tune_up, 3), "\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_tune_up, 3), "\n")
+cat("  F1 Score             :", round(f1_OA_tune_up, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA_tune_up, 3), "\n")
+cat("  Specificity (Recall)  :", round(specificity_no_OA_tune_up, 3), "\n")
+cat("  F1 Score              :", round(f1_no_OA_tune_up, 3), "\n")
+```
+
+
+
+# ------------------------ AUC for Logistic Rgeression ------------------------
+```{r, fig.width=7, fig.height=7}
+# ------------------ 1. Load Libraries ------------------
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# ------------------ 2. Create ROC Objects ------------------
+roc_LR_cv       <- roc(truth_LR, probs_test_LR$OA, levels = c("no_OA", "OA"))
+roc_LR_up       <- roc(truth_LR_up, probs_test_LR_up$OA, levels = c("no_OA", "OA"))
+roc_LR_down     <- roc(truth_LR_down, probs_test_LR_down$OA, levels = c("no_OA", "OA"))
+roc_LR_tune_up  <- roc(truth_LR_tune_up, probs_test_LR_tune_up$OA, levels = c("no_OA", "OA"))
+
+# ------------------ 3. Create Data Frame of Models and AUCs ------------------
+auc_df <- data.frame(
+  ModelType = c("Baseline LogReg", "Upsampled LogReg", "Downsampled LogReg", "Tuned (Upsampled) LogReg"),
+  AUC = c(auc(roc_LR_cv), auc(roc_LR_up), auc(roc_LR_down), auc(roc_LR_tune_up))
+) %>%
+  arrange(desc(AUC)) %>%
+  mutate(Model = paste0(ModelType, " - AUC: ", round(AUC, 3)))
+
+# ------------------ 4. Create Named ROC List (Sorted by AUC) ------------------
+roc_list_LR <- list(
+  `Baseline LogReg`         = roc_LR_cv,
+  `Upsampled LogReg`        = roc_LR_up,
+  `Downsampled LogReg`      = roc_LR_down,
+  `Tuned (Upsampled) LogReg`= roc_LR_tune_up
+)
+
+# Rename list based on sorted AUC labels
+names(roc_list_LR) <- auc_df$Model
+
+# ------------------ 5. Convert to Long Data Frame ------------------
+roc_df_LR <- bind_rows(
+  lapply(names(roc_list_LR), function(name) {
+    data.frame(
+      FPR = 1 - roc_list_LR[[name]]$specificities,
+      TPR = roc_list_LR[[name]]$sensitivities,
+      Model = name
+    )
+  }),
+  .id = "id"
+)
+
+# Set factor level order for legend
+roc_df_LR$Model <- factor(roc_df_LR$Model, levels = auc_df$Model)
+
+# ------------------ 6. Define Custom Colors in Sorted Order ------------------
+custom_colors <- c("blue", "red", "green", "orange")
+names(custom_colors) <- auc_df$Model
+
+# ------------------ 7. Plot ROC Curves ------------------
+roc_plot <- ggplot(roc_df_LR, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(size = 0.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey") +
+  scale_color_manual(values = custom_colors) +
+  labs(
+    title = "ROC Curves: Logistic Regression Models",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = c(0.98, 0.05),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(fill = "white", color = "black", size = 0.7),
+    aspect.ratio = 1
+  ) +
+  guides(color = guide_legend(byrow = TRUE)) +
+  xlim(0, 1) +
+  ylim(0, 1)
+
+# ------------------ 8. Print Plot ------------------
+print(roc_plot)
+
+# ------------------ 9. Save to PNG ------------------
+ggsave(
+  filename = "logreg_roc_curves.png",
+  plot = roc_plot,
+  width = 7, height = 7, units = "in",
+  dpi = 300,
+  bg = "white"
+)
+```
+
+```{r}
+dir.create("data", showWarnings = FALSE)
+saveRDS(train_data_LR, "data/train_data_LR.rds")
+saveRDS(test_data_LR,  "data/test_data_LR.rds")
+```
+
+
+
+#===============================================================================
+
+
+# ------------------------------ Data Preparation ------------------------------
+# ========== Random Forest 
+
+
+```{r, message=FALSE, warning=FALSE}
+# ---------------------- 1. Load Required Libraries ----------------------
+library(randomForest)
+
+# ---------------------- 2. Use Preprocessed Data ----------------------
+train_data_RF <- train_data  
+test_data_RF  <- test_data  
+
+#str(train_data_RF)
+#str(test_data_RF)
+```
+
+
+
+#----------------------------------- CV only -----------------------------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+
+# ---------------------- 2. Cross-Validation Setup ----------------------
+ctrl_RF <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 3. Train Random Forest ----------------------
+set.seed(123)
+model_RF <- train(
+  heartoa ~ .,
+  data = train_data_RF,
+  method = "rf",
+  metric = "ROC",
+  trControl = ctrl_RF
+)
+
+# ---------------------- 4. Predict on Test Set ----------------------
+probs_test_RF <- predict(model_RF, newdata = test_data_RF, type = "prob")
+
+threshold <- 0.35
+pred_test_RF <- factor(
+  ifelse(probs_test_RF$OA > threshold, "OA", "no_OA"),
+  levels = c("no_OA", "OA")
+)
+
+truth_RF <- test_data_RF$heartoa
+
+# ---------------------- 5. Confusion Matrix & Overall Metrics ----------------------
+cm_RF <- confusionMatrix(pred_test_RF, truth_RF, positive = "OA")
+
+accuracy_RF    <- Accuracy(y_pred = pred_test_RF, y_true = truth_RF)
+precision_RF   <- Precision(y_pred = pred_test_RF, y_true = truth_RF, positive = "OA")
+recall_RF      <- Recall(y_pred = pred_test_RF, y_true = truth_RF, positive = "OA")
+f1_RF          <- F1_Score(y_pred = pred_test_RF, y_true = truth_RF, positive = "OA")
+specificity_RF <- cm_RF$byClass["Specificity"]
+
+# AUC - Test
+roc_obj_RF <- roc(response = truth_RF, predictor = probs_test_RF$OA, levels = c("no_OA", "OA"))
+auc_RF <- auc(roc_obj_RF)
+
+# AUC - Train (mean AUC from cross-validation)
+train_auc_RF <- mean(model_RF$resample$ROC)
+
+# ---------------------- 6. Manual Per-Class Metrics ----------------------
+TP_RF <- cm_RF$table["OA", "OA"]
+FP_RF <- cm_RF$table["OA", "no_OA"]
+FN_RF <- cm_RF$table["no_OA", "OA"]
+TN_RF <- cm_RF$table["no_OA", "no_OA"]
+
+# OA class (positive)
+precision_OA_RF <- TP_RF / (TP_RF + FP_RF)
+recall_OA_RF    <- TP_RF / (TP_RF + FN_RF)
+f1_OA_RF        <- 2 * precision_OA_RF * recall_OA_RF / (precision_OA_RF + recall_OA_RF)
+
+# no_OA class (negative)
+npv_no_OA_RF         <- TN_RF / (TN_RF + FN_RF)
+specificity_no_OA_RF <- TN_RF / (TN_RF + FP_RF)
+f1_no_OA_RF          <- 2 * npv_no_OA_RF * specificity_no_OA_RF / (npv_no_OA_RF + specificity_no_OA_RF)
+
+# ---------------------- 7. Print Results ----------------------
+cat(" Overall Evaluation (Random Forest @ Threshold 0.4):\n")
+cat("Accuracy        :", round(accuracy_RF, 3), "\n")
+cat("AUC (Test)      :", round(auc_RF, 3), "\n")
+cat("AUC (Train/CV)  :", round(train_auc_RF, 3), "\n\n")
+
+cat(" Confusion Matrix:\n")
+print(cm_RF$table)
+
+cat("\n Per-Class Evaluation (Manual Calculation):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_RF, 3), "\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_RF, 3), "\n")
+cat("  F1 Score             :", round(f1_OA_RF, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA_RF, 3), "\n")
+cat("  Specificity (Recall)  :", round(specificity_no_OA_RF, 3), "\n")
+cat("  F1 Score              :", round(f1_no_OA_RF, 3), "\n")
+```
+
+
+
+# --------------------------------- Upsampling ---------------------------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+library(DescTools)
+
+# ---------------------- 2. Upsample Training Data ----------------------
+set.seed(123)
+train_data_RF_up <- upSample(
+  x = train_data_RF[, setdiff(names(train_data_RF), "heartoa")],
+  y = train_data_RF$heartoa,
+  yname = "heartoa"
+)
+
+# ---------------------- 3. Define CV Control ----------------------
+ctrl_RF_up <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 4. Train RF Model ----------------------
+set.seed(123)
+model_RF_up <- train(
+  heartoa ~ .,
+  data = train_data_RF_up,
+  method = "rf",
+  metric = "ROC",
+  trControl = ctrl_RF_up
+)
+
+# ---------------------- 5. Predict on Test Set ----------------------
+probs_test_RF_up <- predict(model_RF_up, newdata = test_data_RF, type = "prob")
+
+threshold <- 0.4
+pred_test_RF_up <- factor(
+  ifelse(probs_test_RF_up$OA > threshold, "OA", "no_OA"),
+  levels = c("no_OA", "OA")
+)
+
+truth_RF_up <- test_data_RF$heartoa
+
+# ---------------------- 6. Evaluation Metrics ----------------------
+cm_RF_up <- confusionMatrix(pred_test_RF_up, truth_RF_up, positive = "OA")
+
+accuracy_RF_up     <- Accuracy(y_pred = pred_test_RF_up, y_true = truth_RF_up)
+train_auc_RF_up    <- mean(model_RF_up$resample$ROC)
+roc_obj_RF_up      <- roc(response = truth_RF_up, predictor = probs_test_RF_up$OA, levels = c("no_OA", "OA"))
+auc_RF_up          <- auc(roc_obj_RF_up)
+ci_auc_RF_up       <- ci.auc(roc_obj_RF_up, conf.level = 0.95)
+
+# ---------------------- 7. Manual Per-Class Metrics ----------------------
+TP_rf_up <- cm_RF_up$table["OA", "OA"]
+FP_rf_up <- cm_RF_up$table["OA", "no_OA"]
+FN_rf_up <- cm_RF_up$table["no_OA", "OA"]
+TN_rf_up <- cm_RF_up$table["no_OA", "no_OA"]
+
+# OA (positive class)
+precision_OA_RF_up <- TP_rf_up / (TP_rf_up + FP_rf_up)
+recall_OA_RF_up    <- TP_rf_up / (TP_rf_up + FN_rf_up)
+f1_OA_RF_up        <- 2 * precision_OA_RF_up * recall_OA_RF_up / (precision_OA_RF_up + recall_OA_RF_up)
+
+# no_OA (negative class)
+npv_no_OA_RF_up         <- TN_rf_up / (TN_rf_up + FN_rf_up)
+specificity_no_OA_RF_up <- TN_rf_up / (TN_rf_up + FP_rf_up)
+f1_no_OA_RF_up          <- 2 * npv_no_OA_RF_up * specificity_no_OA_RF_up / (npv_no_OA_RF_up + specificity_no_OA_RF_up)
+
+# Total for CI calculations
+P_rf_up <- TP_rf_up + FN_rf_up
+N_rf_up <- TN_rf_up + FP_rf_up
+total_rf_up <- TP_rf_up + TN_rf_up + FP_rf_up + FN_rf_up
+correct_rf_up <- TP_rf_up + TN_rf_up
+
+# ---------------------- 8. Confidence Intervals ----------------------
+ci_sens_RF_up    <- BinomCI(x = TP_rf_up, n = P_rf_up, conf.level = 0.95, method = "wilson")
+ci_spec_RF_up    <- BinomCI(x = TN_rf_up, n = N_rf_up, conf.level = 0.95, method = "wilson")
+ci_prec_RF_up    <- BinomCI(x = TP_rf_up, n = TP_rf_up + FP_rf_up, conf.level = 0.95, method = "wilson")
+ci_npv_RF_up     <- BinomCI(x = TN_rf_up, n = TN_rf_up + FN_rf_up, conf.level = 0.95, method = "wilson")
+ci_acc_RF_up     <- BinomCI(x = correct_rf_up, n = total_rf_up, conf.level = 0.95, method = "wilson")
+
+# ---------------------- 9. Print Results ----------------------
+cat(" Random Forest (Upsampled) Evaluation @ Threshold 0.4\n")
+cat("------------------------------------------------------------\n")
+cat("Accuracy        :", round(accuracy_RF_up, 3),
+    " (95% CI:", paste0(round(ci_acc_RF_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("AUC (Test Set)  :", round(auc_RF_up, 3),
+    " (95% CI:", paste0(round(ci_auc_RF_up[2:3], 3), collapse = "–"), ")\n")
+cat("AUC (Train CV)  :", round(train_auc_RF_up, 3), "\n\n")
+
+cat(" Confusion Matrix:\n")
+print(cm_RF_up$table)
+
+cat("\n Per-Class Evaluation (with 95% CI):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_RF_up, 3),
+    " (95% CI:", paste0(round(ci_prec_RF_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_RF_up, 3),
+    " (95% CI:", paste0(round(ci_sens_RF_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  F1 Score             :", round(f1_OA_RF_up, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA_RF_up, 3),
+    " (95% CI:", paste0(round(ci_npv_RF_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  Specificity (Recall)  :", round(specificity_no_OA_RF_up, 3),
+    " (95% CI:", paste0(round(ci_spec_RF_up[1, 2:3], 3), collapse = "–"), ")\n")
+cat("  F1 Score              :", round(f1_no_OA_RF_up, 3), "\n")
+```
+
+
+
+# -------------------------------- Downsampling --------------------------------
+```{r}
+# ---------------------- 1. Load Libraries ----------------------
+library(caret)
+library(e1071)
+library(MLmetrics)
+library(pROC)
+
+# ---------------------- 2. Downsample Training Data ----------------------
+set.seed(123)
+train_data_RF_down <- downSample(
+  x = train_data_RF[, setdiff(names(train_data_RF), "heartoa")],
+  y = train_data_RF$heartoa,
+  yname = "heartoa"
+)
+
+# ---------------------- 3. Define CV Control ----------------------
+ctrl_RF_down <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# ---------------------- 4. Train RF Model ----------------------
+set.seed(123)
+model_RF_down <- train(
+  heartoa ~ .,
+  data = train_data_RF_down,
+  method = "rf",
+  metric = "ROC",
+  trControl = ctrl_RF_down
+)
+
+# ---------------------- 5. Predict on Test Set ----------------------
+probs_test_RF_down <- predict(model_RF_down, newdata = test_data_RF, type = "prob")
+threshold <- 0.4
+pred_test_RF_down <- factor(ifelse(probs_test_RF_down$OA > threshold, "OA", "no_OA"), levels = c("no_OA", "OA"))
+truth_RF_down <- test_data_RF$heartoa
+
+# ---------------------- 6. Confusion Matrix & Metrics ----------------------
+cm_RF_down <- confusionMatrix(pred_test_RF_down, truth_RF_down, positive = "OA")
+
+accuracy_RF_down     <- Accuracy(y_pred = pred_test_RF_down, y_true = truth_RF_down)
+precision_RF_down    <- Precision(y_pred = pred_test_RF_down, y_true = truth_RF_down, positive = "OA")
+recall_RF_down       <- Recall(y_pred = pred_test_RF_down, y_true = truth_RF_down, positive = "OA")
+f1_RF_down           <- F1_Score(y_pred = pred_test_RF_down, y_true = truth_RF_down, positive = "OA")
+specificity_RF_down  <- cm_RF_down$byClass["Specificity"]
+
+# AUC - Test
+roc_obj_RF_down <- roc(response = truth_RF_down, predictor = probs_test_RF_down$OA, levels = c("no_OA", "OA"))
+auc_RF_down <- auc(roc_obj_RF_down)
+
+# AUC - Train (CV)
+train_auc_RF_down <- mean(model_RF_down$resample$ROC)
+
+# ---------------------- 7. Per-Class Metrics ----------------------
+TP_RF_down <- cm_RF_down$table["OA", "OA"]
+FP_RF_down <- cm_RF_down$table["OA", "no_OA"]
+FN_RF_down <- cm_RF_down$table["no_OA", "OA"]
+TN_RF_down <- cm_RF_down$table["no_OA", "no_OA"]
+
+# OA (Positive Class)
+precision_OA_RF_down <- TP_RF_down / (TP_RF_down + FP_RF_down)
+recall_OA_RF_down    <- TP_RF_down / (TP_RF_down + FN_RF_down)
+f1_OA_RF_down        <- 2 * precision_OA_RF_down * recall_OA_RF_down / (precision_OA_RF_down + recall_OA_RF_down)
+
+# no_OA (Negative Class)
+npv_no_OA_RF_down         <- TN_RF_down / (TN_RF_down + FN_RF_down)
+specificity_no_OA_RF_down <- TN_RF_down / (TN_RF_down + FP_RF_down)
+f1_no_OA_RF_down          <- 2 * npv_no_OA_RF_down * specificity_no_OA_RF_down / (npv_no_OA_RF_down + specificity_no_OA_RF_down)
+
+# ---------------------- 8. Print Results ----------------------
+cat(" Overall Evaluation (Random Forest - Downsampled @ Threshold 0.4):\n")
+cat("Accuracy        :", round(accuracy_RF_down, 3), "\n")
+cat("AUC (Test)      :", round(auc_RF_down, 3), "\n")
+cat("AUC (Train/CV)  :", round(train_auc_RF_down, 3), "\n\n")
+
+cat(" Confusion Matrix:\n")
+print(cm_RF_down$table)
+
+cat("\n Per-Class Evaluation (Manual Calculation):\n")
+
+cat("\nClass: OA (Positive Class)\n")
+cat("  Precision            :", round(precision_OA_RF_down, 3), "\n")
+cat("  Recall (Sensitivity) :", round(recall_OA_RF_down, 3), "\n")
+cat("  F1 Score             :", round(f1_OA_RF_down, 3), "\n")
+
+cat("\nClass: no_OA (Negative Class)\n")
+cat("  NPV (Precision)       :", round(npv_no_OA_RF_down, 3), "\n")
+cat("  Specificity (Recall)  :", round(specificity_no_OA_RF_down, 3), "\n")
+cat("  F1 Score              :", round(f1_no_OA_RF_down, 3), "\n")
+```
+
+
+
+# ------------------------ AUC for Random Forest Models ------------------------
+```{r, fig.width=7, fig.height=7}
+# ---------------------- 1) Libraries ----------------------
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# ---------------------- 2) ROC objects ----------------------
+# Ensure truth vectors are factors with the positive class last (OA)
+truth_RF      <- factor(truth_RF,      levels = c("no_OA", "OA"))
+truth_RF_up   <- factor(truth_RF_up,   levels = c("no_OA", "OA"))
+truth_RF_down <- factor(truth_RF_down, levels = c("no_OA", "OA"))
+
+roc_RF_base <- roc(truth_RF,      probs_test_RF$OA,      levels = c("no_OA", "OA"))
+roc_RF_up   <- roc(truth_RF_up,   probs_test_RF_up$OA,   levels = c("no_OA", "OA"))
+roc_RF_down <- roc(truth_RF_down, probs_test_RF_down$OA, levels = c("no_OA", "OA"))
+
+# ---------------------- 3) Labels + named list ----------------------
+model_labels_RF <- c(
+  paste0("Baseline RF - AUC: ", round(auc(roc_RF_base), 3)),
+  paste0("Upsampled RF - AUC: ", round(auc(roc_RF_up), 3)),
+  paste0("Downsampled RF - AUC: ", round(auc(roc_RF_down), 3))
+)
+
+roc_list_RF <- setNames(
+  list(roc_RF_base, roc_RF_up, roc_RF_down),
+  model_labels_RF
+)
+
+# ---------------------- 4) Order by AUC & make long DF ----------------------
+auc_values <- sapply(roc_list_RF, auc)
+ordered_labels <- names(sort(auc_values, decreasing = TRUE))
+
+roc_df_RF <- bind_rows(
+  lapply(ordered_labels, function(name) {
+    x <- roc_list_RF[[name]]
+    data.frame(
+      FPR = 1 - x$specificities,
+      TPR = x$sensitivities,
+      Model = factor(name, levels = ordered_labels)
+    )
+  }),
+  .id = "id"
+)
+
+# ---------------------- 5) Colors aligned to ordered legend ----------------------
+custom_colors_RF <- c("green", "blue", "red")
+names(custom_colors_RF) <- ordered_labels
+
+# ---------------------- 6) Plot ----------------------
+roc_plot_RF <- ggplot(roc_df_RF, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(size = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey") +
+  scale_color_manual(values = custom_colors_RF) +
+  labs(
+    title = "ROC Curves: Random Forest Models",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = c(0.98, 0.05),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(fill = "white", color = "black", size = 0.7),
+    aspect.ratio = 1
+  ) +
+  guides(color = guide_legend(byrow = TRUE)) +
+  xlim(0, 1) + ylim(0, 1)
+
+print(roc_plot_RF)
+
+# ---------------------- 7) Save ----------------------
+ggsave(
+  filename = "rf_roc_curves.png",
+  plot = roc_plot_RF,
+  width = 7, height = 7, units = "in",
+  dpi = 300,
+  bg = "white"
+)
+```
+
+
+
+#===============================================================================
+
+#------------------------------ Export ROC-Curves ------------------------------
+```{r}
+# --- Load Libraries ---
+library(pROC)
+library(dplyr)
+
+# --- Select Your Models ---
+roc_LR_up   <- roc(truth_LR_up, probs_test_LR_up$OA, levels = c("no_OA", "OA"))
+roc_RF_up   <- roc(truth_RF_up, probs_test_RF_up$OA, levels = c("no_OA", "OA"))
+
+# --- Define Labels with AUCs ---
+model_labels <- c(
+  paste0("LogReg (Upsampled) - AUC: ", round(auc(roc_LR_up), 3)),
+  paste0("Random Forest (Upsampled) - AUC: ", round(auc(roc_RF_up), 3))
+)
+
+roc_list <- list(roc_LR_up, roc_RF_up)
+names(roc_list) <- model_labels
+
+# --- Convert to DataFrame for Export ---
+roc_export_df <- bind_rows(
+  lapply(names(roc_list), function(name) {
+    data.frame(
+      FPR = 1 - roc_list[[name]]$specificities,
+      TPR = roc_list[[name]]$sensitivities,
+      Model = name
+    )
+  }),
+  .id = "id"
+)
+
+# --- Export to CSV ---
+write.csv(roc_export_df, "roc_lr_rf_selected.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,474 @@
+---
+title: "2- Feature Selection (deep)"
+author: "Tesneem Fnais"
+date: "2025-07-08"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# set directory
+```{r setup, include=FALSE}
+
+setwd("C:/Users/tasne/OneDrive/Desktop/UoB/M7_Interdisciplinary Health Data Research Project/Final Binary")
+```
+
+```{r}
+wave9 <- read.csv("initial_dataset.csv")
+
+str(wave9) # View dataset structure
+```
+
+```{r}
+# Convert all integer columns to numeric
+wave9[] <- lapply(wave9, function(x) {
+  if (is.integer(x)) as.numeric(x) else x
+})
+
+# Confirm result
+sapply(wave9, class)
+```
+
+```{r}
+# load libraries
+
+library(data.table)
+library(dplyr)
+library(Boruta)
+library(caret)
+library(ggplot2)
+library(stats)
+
+# Recode outcome variable as factor (required for modeling)
+wave9$heartoa <- factor(wave9$heartoa, levels = c(0, 1), labels = c("no_OA", "OA"))
+
+table(wave9$heartoa, useNA = "ifany")
+```
+
+# data splitting 
+```{r}
+set.seed(123)
+split_index <- createDataPartition(wave9$heartoa, p = 0.8, list = FALSE)
+train_data <- wave9[split_index, ]
+test_data  <- wave9[-split_index, ]
+```
+
+
+
+#===============================================================================
+
+#------------------------------ Bivariate Analysis -----------------------------
+
+```{r}
+
+# Define Variable Groups 
+
+# Binary variables (use Chi-square test)
+binary_vars <- c(
+  "sex", "hepawba", "hepawhi", "hepawkn", "hepawfe", "hepawot", "mmpain",
+  "hemobwa", "hemobsi", "hemobch", "hemobcs", "hemobcl", "hemobst", "hemobre",
+  "hemobpu", "hemobpi", "headldr", "headlba", "headlea", "headlbe", "headlwc",
+  "headlpr", "headlsh", "heacd" )
+
+
+# Ordinal variables (Wilcoxon or Kruskal-Wallis)
+ordinal_vars <- c("hepaa", "hehelf")
+
+
+# Continuous variables (Wilcoxon test)
+continuous_vars <- c("age", "hebck", "hehip", "hekne", "hefet", "grip_mean")
+```
+
+```{r}
+# Run Statistical Tests 
+
+results <- list()
+
+# Binary variables → Chi-square or Fisher's
+for (var in binary_vars) {
+  tbl <- table(train_data[[var]], train_data$heartoa)
+  pval <- tryCatch({
+    if (any(tbl < 5)) fisher.test(tbl)$p.value else chisq.test(tbl)$p.value
+  }, error = function(e) NA)
+  results[[var]] <- c("Chi-square", pval)
+}
+
+# Ordinal variables → Wilcoxon
+for (var in ordinal_vars) {
+  pval <- tryCatch({
+    wilcox.test(train_data[[var]] ~ train_data$heartoa)$p.value
+  }, error = function(e) NA)
+  results[[var]] <- c("Wilcoxon", pval)
+}
+
+# Continuous variables → Wilcoxon
+for (var in continuous_vars) {
+  pval <- tryCatch({
+    wilcox.test(train_data[[var]] ~ train_data$heartoa)$p.value
+  }, error = function(e) NA)
+  results[[var]] <- c("Wilcoxon", pval)
+}
+```
+
+```{r}
+# Organize and View Results 
+
+results_df <- as.data.frame(do.call(rbind, results))
+colnames(results_df) <- c("Test", "P_Value")
+results_df$Variable <- rownames(results_df)
+results_df$P_Value <- as.numeric(results_df$P_Value)
+results_df <- results_df %>% arrange(P_Value)
+
+# View significant variables (p < 0.05)
+print(results_df[results_df$P_Value < 0.05, ])
+
+# Save all test results to CSV
+#write.csv(results_df, "bivariate_test_results.csv", row.names = FALSE)
+```
+
+```{r}
+# View non-significant variables (p > 0.05)
+non_significant <- results_df[results_df$P_Value > 0.05, ]
+print(non_significant)
+```
+
+```{r}
+# Step 1: Get names of significant variables (p < 0.05)
+significant_vars <- results_df[results_df$P_Value < 0.05, "Variable"]
+
+# Step 2: Add outcome variable to ensure it's retained
+significant_vars <- c(as.character(significant_vars), "heartoa")
+
+# Step 3: Subset train_data to only include significant variables
+train_data <- train_data[, significant_vars]
+```
+
+
+
+#===============================================================================
+
+# ----------------------------------- Boruta -----------------------------------
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+
+# 1. Run Boruta Feature Selection (on training data only)
+set.seed(123)
+boruta_result <- Boruta(heartoa ~ ., data = train_data, maxRuns = 100, doTrace = 0)
+
+# Step after Boruta
+boruta_result <- TentativeRoughFix(boruta_result)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# 2. Add Descriptive Labels (for plotting only)
+descriptive_labels <- c(
+  "age"       = "Age (years)",
+  "sex"       = "Sex",
+  "hepaa"     = "Pain Severity (Most of the time)",
+  "hepawba"   = "Back Pain",
+  "hepawhi"   = "Hip Pain",
+  "hepawkn"   = "Knee Pain",
+  "hepawfe"   = "Foot Pain",
+  "hepawot"   = "Pain Elsewhere",
+  "mmpain"    = "Pain while Walking",
+  "hemobwa"   = "Difficulty Walking 100 Yards",
+  "hemobsi"   = "Difficulty Sitting 2 Hours",
+  "hemobch"   = "Difficulty Getting Up from Chair",
+  "hemobcs"   = "Difficulty Climbing Several Flights",
+  "hemobcl"   = "Difficulty Climbing One Flight",
+  "hemobst"   = "Difficulty Stooping/Kneeling",
+  "hemobre"   = "Difficulty Reaching Overhead",
+  "hemobpu"   = "Difficulty Pushing Objects",
+  "hemobpi"   = "Difficulty Lifting 10 lbs.",
+  "headldr"   = "Difficulty Dressing",
+  "headlba"   = "Difficulty Bathing",
+  "headlbe"   = "Difficulty Getting In/Out of Bed",
+  "hehelf"    = "Self-Rated General Health",
+  "grip_mean" = "Grip Strength (kg)",
+  "hebck"     = "Back Pain Rating",
+  "hehip"     = "Hip Pain Rating",
+  "hekne"     = "Knee Pain Rating",
+  "hefet"     = "Foot Pain Rating",
+  "headlea"   = "Difficulty Eating (Cutting Food)",
+  "headlwc"   = "Difficulty Using the Toilet",
+  "headlpr"   = "Difficulty Preparing Meals",
+  "headlsh"   = "Difficulty Grocery Shopping"
+)
+
+# Apply descriptive labels to ImpHistory for cleaner plots
+if (!is.null(boruta_result$ImpHistory)) {
+  original_names <- colnames(boruta_result$ImpHistory)
+  colnames(boruta_result$ImpHistory) <- ifelse(
+    original_names %in% names(descriptive_labels),
+    descriptive_labels[original_names],
+    original_names
+  )
+}
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# 3. Plot Boruta Feature Importance
+png("boruta_feature_importance_cleaned.png", width = 1200, height = 900, res = 150)
+par(mar = c(13, 4, 4, 2))  # bottom margin to fit rotated labels
+plot(boruta_result, las = 2, cex.axis = 0.55,
+     main = "Boruta Feature Importance", xlab = "")
+mtext("Features", side = 1, line = 10, cex = 1)
+dev.off()
+```
+
+```{r}
+# 4. Show Confirmed and Dropped Features
+boruta_stats <- attStats(boruta_result)
+
+confirmed_vars <- rownames(boruta_stats[boruta_stats$decision == "Confirmed", , drop = FALSE])
+cat("Confirmed Variables:\n")
+print(confirmed_vars)
+
+dropped_vars <- rownames(boruta_stats[boruta_stats$decision == "Rejected", , drop = FALSE])
+cat("\n Dropped Variables:\n")
+print(dropped_vars)
+
+
+
+# 5. Subset Training Set Only
+selected_features <- getSelectedAttributes(boruta_result, withTentative = FALSE)
+selected_features <- c(selected_features, "heartoa")  # ensure outcome included
+
+# Safely subset training data
+train_data <- train_data[, selected_features, drop = FALSE]
+
+# (No changes to test_data here — do it later after final feature selection)
+```
+
+
+
+#===============================================================================
+
+# ------------------------------ Multicolinearity ------------------------------
+
+```{r, message=FALSE, warning=FALSE}
+
+# ------------------ Multicollinearity Check Using VIF ------------------
+library(car)
+
+# Fit logistic regression model on Boruta-selected training data
+model_vif <- glm(heartoa ~ ., data = train_data, family = binomial)
+
+# Calculate VIF
+vif_values <- vif(model_vif)
+
+# Print VIF values
+print(vif_values)
+```
+
+```{r}
+# Flag high VIFs (commonly > 5)
+high_vif <- vif_values[vif_values > 5]
+
+cat("\nVariables with high multicollinearity (VIF > 5):\n")
+print(high_vif)
+```
+
+```{r}
+#write.csv(wave9, "feature_selection_dataset.csv", row.names = FALSE)
+```
+
+
+
+#===============================================================================
+
+#--------------------------------- Correlation ---------------------------------
+
+```{r, message=FALSE, warning=FALSE}
+
+# Load Required Libraries
+library(tidyverse)
+library(corrplot)
+library(psych)
+library(broom)
+library(tibble)
+
+
+
+# Variable Type Separation
+cont_vars <- train_data %>% select(age, grip_mean)
+ord_vars <- train_data %>% select(hepaa, hebck, hehip, hekne, hefet, hehelf)
+bin_vars <- train_data %>%
+  select(-heartoa, -age, -grip_mean,
+         -hepaa, -hebck, -hehip, -hekne, -hefet, -hehelf) %>%
+  mutate(across(everything(), as.numeric))  # Ensure binary vars are numeric
+
+
+
+# Correlation Matrix (Spearman)
+all_vars <- bind_cols(cont_vars, ord_vars, bin_vars)
+cor_matrix <- cor(all_vars, use = "complete.obs", method = "spearman")
+
+# Optional: Store original names
+original_names <- colnames(cor_matrix)
+print(original_names)
+
+
+
+# Descriptive Plot Labels
+pretty_names_map <- c(
+  age = "Age",
+  grip_mean = "Grip Strength",
+  hepaa = "Pain Severity (Most of the time)",
+  hebck = "Back Pain Rating",
+  hehip = "Hip Pain Rating",
+  hekne = "Knee Pain Rating",
+  hefet = "Foot Pain Rating",
+  hehelf = "Self-Rated General Health",
+  hemobst = "Difficulty Stooping/Kneeling",
+  hepawkn = "Knee Pain",
+  hemobch = "Difficulty Getting Up from Chair",
+  hepawba = "Back Pain",
+  hemobcs = "Difficulty Climbing Several Flights",
+  hepawhi = "Hip Pain",
+  hepawfe = "Foot Pain",
+  hemobsi = "Difficulty Sitting 2 Hours",
+  hemobpu = "Difficulty Pushing Objects",
+  headldr = "Difficulty Dressing",
+  hemobcl = "Difficulty Climbing One Flight",
+  hemobwa = "Difficulty Walking 100 Yards",
+  hemobre = "Difficulty Reaching Overhead",
+  hepawot = "Pain Elsewhere",
+  sex = "Sex",
+  headlbe = "Difficulty Getting In/Out of Bed",
+  mmpain = "Pain While Walking",
+  hemobpi = "Difficulty Lifting 10 lbs.",
+  headlba = "Difficulty Bathing",
+  headlwa = "Difficulty Walking Across Room",
+  headlwc   = "Difficulty Using the Toilet",
+  headlsh   = "Difficulty Grocery Shopping"
+)
+
+# Apply pretty names for plotting only
+cor_plot_matrix <- cor_matrix
+colnames(cor_plot_matrix) <- pretty_names_map[colnames(cor_plot_matrix)]
+rownames(cor_plot_matrix) <- pretty_names_map[rownames(cor_plot_matrix)]
+
+
+
+# Correlation Plot
+png("correlation_matrix.png", width = 4000, height = 4000, res = 400)
+corrplot(cor_plot_matrix,
+         method = "color",
+         type = "full",
+         order = "hclust",
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         addCoef.col = "black",
+         number.cex = 0.6,
+         tl.cex = 1,
+         tl.col = "black",
+         cl.cex = 1.2,
+         mar = c(2, 2, 5, 2))
+title("Spearman Correlation Matrix", cex.main = 2.5)
+dev.off()
+
+
+
+# Extract High Correlation Pairs (|ρ| ≥ 0.8)
+high_corr_pairs <- as.data.frame(as.table(cor_matrix)) %>%
+  filter(abs(Freq) >= 0.8 & Var1 != Var2) %>%
+  arrange(desc(abs(Freq))) %>%
+  filter(as.numeric(factor(Var1)) < as.numeric(factor(Var2)))  # remove duplicates
+
+#write.csv(high_corr_pairs, "correlation_high_pairs_train_only.csv", row.names = FALSE)
+
+
+
+# Univariate Logistic Regression
+# Define correlated variable pairs (from Spearman)
+paired_vars <- list(
+  c("hekne" , "hepawkn"),
+  c("hefet" , "hepawfe"),
+  c("hehip" , "hepawhi"),
+  c("hebck" , "hepawba")
+)
+
+# Label mapping for output table
+labels <- c(
+  hepawkn = "Knee Pain",
+  hekne   = "Knee Pain Rating",
+  hepawfe = "Foot Pain",
+  hefet   = "Foot Pain Rating",
+  hepawhi = "Hip Pain",
+  hehip   = "Hip Pain Rating",
+  hepawba = "Back Pain",
+  hebck   = "Back Pain Rating"
+)
+
+# Run univariate logistic regression on train data only
+library(broom)
+univariate_results <- list()
+
+for (pair in paired_vars) {
+  for (var in pair) {
+    if (!var %in% names(train_data)) next
+    model <- glm(as.formula(paste("heartoa ~", var)), data = train_data, family = "binomial")
+    tidy_model <- tidy(model) %>%
+      mutate(
+        variable = var,
+        odds_ratio = exp(estimate)
+      ) %>%
+      select(variable, term, estimate, odds_ratio, std.error, statistic, p.value) %>%
+      filter(term != "(Intercept)")
+    univariate_results[[var]] <- tidy_model
+  }
+}
+
+# Combine and label
+univariate_df <- bind_rows(univariate_results) %>%
+  arrange(p.value) %>%
+  mutate(label = labels[variable])
+
+# Save output table
+write.csv(univariate_df, "univariate_results_train.csv", row.names = FALSE) 
+
+
+
+# Drop Redundant Variables
+drop_vars <- c("hekne", "hefet", "hehip", "hebck")
+
+# Drop from train only (test set untouched for now)
+train_data <- train_data %>%
+  select(-all_of(drop_vars))
+```
+
+```{r}
+#write.csv(train_data, "train_data_final.csv", row.names = FALSE)
+```
+
+
+# subsetting to test set
+```{r}
+# Ensure test_data is already defined and untouched
+test_data_final <- test_data[, names(train_data)]
+
+#write.csv(test_data_final, "test_data_final.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

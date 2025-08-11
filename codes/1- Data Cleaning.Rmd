@@ -1,0 +1,556 @@
+---
+title: "1- Data Cleaning"
+author: "Tesneem Fnais"
+date: "2025-07-08"
+output: html_document
+---
+
+# description: This R Markdown document performs data cleaning for the ELSA Wave 9 dataset used in osteoarthritis prediction modeling. It includes steps for loading, merging, selecting, and recoding variables, handling missing values, and filtering the study population. The cleaned dataset is saved for subsequent feature selection and machine learning analysis.
+
+
+
+#===============================================================================
+
+# load required libraries
+```{r, message=FALSE, warning=FALSE}
+
+library(readr)      # For read_csv
+library(data.table) # For fread (if large files)
+library(dplyr)      # For data wrangling
+```
+
+
+# set directory
+```{r setup, include=FALSE}
+
+setwd("C:/Users/tasne/OneDrive/Desktop/UoB/M7_Interdisciplinary Health Data Research Project/Final Binary")
+```
+
+
+# load wave datasets
+```{r}
+
+wave9_main <- fread("C:/Users/tasne/OneDrive/Desktop/UoB/M7_Interdisciplinary Health Data Research Project/5050tab_B95C1716690E6D899ABABC47F3A5A3FD8DA8E3FD58394424C3185094D0ADF635_V1/UKDA-5050-tab/tab/wave_9_elsa_data_eul_v2.tab", sep = "\t")
+
+wave9_ifs <- fread("C:/Users/tasne/OneDrive/Desktop/UoB/M7_Interdisciplinary Health Data Research Project/5050tab_B95C1716690E6D899ABABC47F3A5A3FD8DA8E3FD58394424C3185094D0ADF635_V1/UKDA-5050-tab/tab/wave_9_ifs_derived_variables.tab", sep = "\t")
+
+wave9_nurse <- fread("C:/Users/tasne/OneDrive/Desktop/UoB/M7_Interdisciplinary Health Data Research Project/5050tab_B95C1716690E6D899ABABC47F3A5A3FD8DA8E3FD58394424C3185094D0ADF635_V1/UKDA-5050-tab/tab/elsa_nurse_w8w9_data_eul.tab", sep = "\t")
+```
+
+
+# lowercase columns 
+```{r}
+
+names(wave9_main)   <- tolower(names(wave9_main))
+names(wave9_ifs)    <- tolower(names(wave9_ifs))
+names(wave9_nurse)  <- tolower(names(wave9_nurse))
+```
+
+
+# Helper function to add suffix except for idauniq
+```{r}
+
+add_suffix <- function(df, suffix) {
+  names(df) <- ifelse(names(df) == "idauniq", "idauniq", paste0(names(df), "_", suffix))
+  return(df)
+}
+
+wave9_main   <- add_suffix(wave9_main,   "main")
+wave9_ifs   <- add_suffix(wave9_ifs,   "ifs")
+wave9_nurse <- add_suffix(wave9_nurse, "nurse")
+```
+
+
+# join waves into one dataset (left join)
+```{r}
+
+wave9 <- wave9_main %>%
+  left_join(wave9_nurse, by = "idauniq") %>%
+  left_join(wave9_ifs, by = "idauniq")
+```
+
+
+```{r}
+table(wave9_main$heartoa_main, useNA = "ifany")
+table(wave9$heartoa_main, useNA = "ifany")
+```
+
+
+
+#===============================================================================
+
+
+#------------------------------ Feature Selection ------------------------------
+
+
+# initial feature selection based on literature review
+```{r}
+
+selected_features <- c( 
+  "heartoa_main", "age_ifs", "sex_ifs",  
+  "mmgsd1_nurse", "mmgsd2_nurse", "mmgsd3_nurse",
+  "hepaa_main", "hepawba_main", "hepawhi_main","hepawkn_main",  
+  "hepawfe_main", "hepawot_main", "hebck_main", "hehip_main", 
+  "hekne_main", "hefet_main", "mmpain_main",   
+  "hemobwa_main", "hemobsi_main", "hemobch_main", "hemobcs_main", "hemobcl_main", 
+  "hemobst_main", "hemobre_main", "hemobpu_main", "hemobpi_main", "headldr_main", 
+  "headlba_main", "headlea_main", "headlbe_main", "headlwc_main", "headlpr_main",
+  "headlsh_main",  "heacd_main", "hehelf_main")
+
+# REMOVED variables: "weight_main", "edqual_ifs", "hscrp_nurse", "hepawal_main", "sptrab12_main", "wpjact_main", "hefunc_main","headlwa_main", "idauniq",
+
+# Select these columns from wave9
+wave9 <- wave9 %>% select(all_of(selected_features))
+```
+
+```{r}
+table(wave9$heartoa_main, useNA = "ifany")
+```
+
+
+
+#===============================================================================
+
+
+#-------------------------- Cleaning Outcome variable --------------------------
+
+# Osteoarthritis (Outcome "heartoa")
+```{r}
+
+wave9$heartoa_main <- ifelse(wave9$heartoa_main == 1, 1,
+                       ifelse(wave9$heartoa_main %in% c(0, -1), 0, NA)) # Recode heartoa_main: 1 = Yes, 0/-1 = No, others = NA
+
+
+table(wave9$heartoa_main, useNA = "ifany")
+```
+
+```{r}
+# remove NA's
+
+wave9 <- wave9 %>% filter(!is.na(heartoa_main))
+
+# Counts
+counts <- table(wave9$heartoa_main, useNA = "ifany")
+
+# Percentages
+percentages <- prop.table(counts) * 100
+
+# Combine and print nicely
+print(counts)
+print(round(percentages, 2))
+```
+
+
+
+#------------------------ Cleaning predictor variables ------------------------
+
+# Age 
+```{r}
+wave9$age_ifs[wave9$age_ifs == 99] <- 90
+wave9 <- wave9 %>% filter(age_ifs >= 60) # filter to keep 60 years and older
+
+table(wave9$age_ifs, useNA = "ifany")
+```
+
+```{r}
+table(wave9$heartoa_main, useNA = "ifany")
+```
+
+# Sex
+```{r}
+# Step 1: Recode -8 and -1 as NA
+wave9$sex_ifs[wave9$sex_ifs %in% c(-8, -1)] <- NA
+
+# Step 2: Recode: 1 = Male → 0, 2 = Female → 1
+wave9$sex_ifs[wave9$sex_ifs == 1] <- 0
+wave9$sex_ifs[wave9$sex_ifs == 2] <- 1
+
+# Step 3: Confirm result
+table(wave9$sex_ifs, useNA = "ifany")
+```
+
+# weight (weight is similar in both groups therefore removed, not informative)
+```{r}
+#summary(wave9$weight_main)
+#table(wave9$weight_main, useNA = "ifany")
+
+# Recode invalid/missing codes as NA
+#wave9$weight_main <- ifelse(wave9$weight_main < 30 | wave9$weight_main == -1, NA, wave9$weight_main)
+
+#wave9 <- wave9 %>% filter(!is.na(weight_main))
+
+# Ensure OA variable is a factor
+#wave9$heartoa_main <- factor(wave9$heartoa_main, levels = c(0, 1), labels = c("No OA", "OA"))
+
+# Plot side-by-side histograms
+#ggplot(wave9, aes(x = weight_main)) +
+  #geom_histogram(binwidth = 2, fill = "gray70", color = "black") +
+  #facet_wrap(~ heartoa_main, scales = "free_y") +
+  #labs(
+    #title = "Distribution of Weight by OA Status",
+    #x = "Weight (kg)",
+    #y = "Count"
+  #) +
+  #theme_minimal()
+```
+
+# grip (grip_mean)
+#Number of missing values: 1716 
+#Percentage of missing values: 26.63 %
+```{r}
+# ------------------ Grip Strength Feature Engineering ------------------
+
+# Load data.table if not already loaded
+library(data.table)
+
+# Ensure wave9 is a data.table
+setDT(wave9)
+
+# Define grip strength variables
+grip_vars <- c("mmgsd1_nurse", "mmgsd2_nurse", "mmgsd3_nurse")
+
+# Step 1: Recode invalid grip values (< 0 or > 100) as NA
+for (var in grip_vars) {
+  wave9[get(var) < 0 | get(var) > 100, (var) := NA]
+}
+
+# Step 2: Calculate grip_mean as row-wise mean of the three grip measures
+wave9[, grip_mean := rowMeans(.SD, na.rm = TRUE), .SDcols = grip_vars]
+
+# Step 3: Remove rows with missing grip_mean (i.e., all 3 grip measures were invalid/missing)
+wave9 <- wave9[!is.na(grip_mean)]
+
+# Step 4: Drop original grip variables to avoid multicollinearity
+wave9[, (grip_vars) := NULL]
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+
+grip_plot <- ggplot(wave9, aes(x = grip_mean, fill = factor(heartoa_main, labels = c("No OA", "OA")))) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Grip Strength Distribution by OA Status",
+    x = "Grip Strength (kg)",
+    y = "Density",
+    fill = "OA Status"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),  # Title in bold and centered
+    axis.title.x = element_text(size = 16),  # X-axis title
+    axis.title.y = element_text(size = 16),  # Y-axis title
+    axis.text = element_text(size = 14),     # Tick labels on both axes
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 16)
+  )
+
+ggsave("grip_strength_OA_density.png", plot = grip_plot, width = 8, height = 6, dpi = 300, bg = "white")
+
+```
+
+# CRP
+#heartoa_main
+#0	3.20	10.19	3056	
+#1	3.32	8.58	1674
+# means are similar between the two group, hence the variable is drouped
+```{r}
+#table(wave9$hscrp_nurse, useNA = "ifany")
+#wave9$hscrp_nurse[wave9$hscrp_nurse < 0] <- NA
+#wave9 <- wave9[!is.na(hscrp_nurse)]
+# Total rows before removal
+#total_n <- nrow(wave9)
+# Number of missing CRP values
+#missing_n <- sum(is.na(wave9$hscrp_nurse))
+# Percentage of missingness
+#missing_pct <- round((missing_n / total_n) * 100, 2)
+# Print result
+#cat("Missing CRP values:", missing_n, "\n")
+#cat("Percentage missing:", missing_pct, "%\n")
+#wave9[, .(
+  #mean_crp = round(mean(hscrp_nurse, na.rm = TRUE), 2),
+  #sd_crp   = round(sd(hscrp_nurse, na.rm = TRUE), 2),
+  #n        = .N
+#), by = heartoa_main]
+```
+
+# Severity of pain
+```{r}
+table(wave9$hepaa_main, useNA = "ifany")
+
+# Step 1: Replace SPSS missing codes
+wave9$hepaa_main[wave9$hepaa_main == -8] <- NA   # Missing
+wave9$hepaa_main[wave9$hepaa_main == -1] <- 0    # No pain
+
+wave9 <- wave9[wave9$hepaa_main != -8, ]
+
+#table(wave9$hepaa_main, wave9$heartoa_main, useNA = "ifany")
+```
+
+# Whether feel pain in back
+```{r}
+# Step 1: Recode -1 to 0 (not applicable => no back pain)
+wave9$hepawba_main[wave9$hepawba_main == -1] <- 0
+
+# Step 2: Ensure it's binary: 0 = no back pain, 1 = back pain
+wave9$hepawba_main <- ifelse(wave9$hepawba_main == 1, 1, 0)
+
+# Step 3: Check result
+table(wave9$hepawba_main, useNA = "ifany")
+```
+
+# Whether feel pain in hips
+```{r}
+# Step 1: Recode -1 to 0 (no pain => no hip pain)
+wave9$hepawhi_main[wave9$hepawhi_main == -1] <- 0
+
+# Step 2: Convert to binary: 0 = no hip pain, 1 = hip pain
+wave9$hepawhi_main <- ifelse(wave9$hepawhi_main == 1, 1, 0)
+
+# Step 3: Check result
+table(wave9$hepawhi_main, useNA = "ifany")
+```
+
+# Whether feel pain in knees
+```{r}
+# Step 1: Recode -1 to 0 (no knee pain)
+wave9$hepawkn_main[wave9$hepawkn_main == -1] <- 0
+
+# Step 2: Convert to binary: 0 = no knee pain, 1 = knee pain
+wave9$hepawkn_main <- ifelse(wave9$hepawkn_main == 1, 1, 0)
+
+# Step 3: Check result
+table(wave9$hepawkn_main, useNA = "ifany")
+```
+
+# Whether feel pain in feet
+```{r}
+# Step 1: Recode -1 to 0 (no foot pain)
+wave9$hepawfe_main[wave9$hepawfe_main == -1] <- 0
+
+# Step 2: Convert to binary: 0 = no foot pain, 1 = foot pain
+wave9$hepawfe_main <- ifelse(wave9$hepawfe_main == 1, 1, 0)
+
+# Step 3: Confirm the result
+table(wave9$hepawfe_main, useNA = "ifany")
+```
+
+# Whether feel pain elsewhere
+```{r}
+# Step 1: Recode -1 to 0 (no pain elsewhere)
+wave9$hepawot_main[wave9$hepawot_main == -1] <- 0
+
+# Step 2: Convert to binary: 0 = no pain elsewhere, 1 = pain elsewhere
+wave9$hepawot_main <- ifelse(wave9$hepawot_main == 1, 1, 0)
+
+# Step 3: Check result
+table(wave9$hepawot_main, useNA = "ifany")
+```
+
+# Back pain rating walking on flat surface
+```{r}
+# Step 1: Recode special values
+wave9$hebck_main[wave9$hebck_main %in% c(-8, -9)] <- NA
+wave9$hebck_main[wave9$hebck_main == -1] <- 0
+
+# Step 2: Drop NA values
+wave9 <- wave9[!is.na(wave9$hebck_main), ]
+
+# Step 3: Convert to numeric (retain scale 0–10)
+wave9$hebck_main <- as.numeric(wave9$hebck_main)
+
+# Step 4: Confirm result
+table(wave9$hebck_main, useNA = "ifany")
+```
+
+# Hip pain rating walking on flat surface
+```{r}
+# Step 1: Replace SPSS missing codes
+wave9$hehip_main[wave9$hehip_main == -8] <- NA   # Missing
+wave9$hehip_main[wave9$hehip_main == -1] <- 0    # No pain
+
+# Step 2: Remove rows with missing values
+wave9 <- wave9[!is.na(wave9$hehip_main), ]
+
+# Step 3: Convert to numeric (preserve 0–10 scale)
+wave9$hehip_main <- as.numeric(wave9$hehip_main)
+
+# Step 4: Confirm result
+table(wave9$hehip_main, useNA = "ifany")
+```
+
+# Knee pain rating walking on flat surface
+```{r}
+# Step 1: Replace SPSS missing codes
+wave9$hekne_main[wave9$hekne_main == -8] <- NA   # -8 = missing
+wave9$hekne_main[wave9$hekne_main == -1] <- 0    # -1 = no pain
+
+# Step 2: Remove rows with missing values
+wave9 <- wave9[!is.na(wave9$hekne_main), ]
+
+# Step 3: Convert to numeric (0–10 pain scale)
+wave9$hekne_main <- as.numeric(wave9$hekne_main)
+
+# Step 4: Confirm distribution
+table(wave9$hekne_main, useNA = "ifany")
+```
+
+# Foot pain rating walking on flat surface
+```{r}
+# Step 1: Replace -8 (missing) with NA
+wave9$hefet_main[wave9$hefet_main == -8] <- NA
+
+# Step 2: Treat -1 ("Item not applicable") as no pain → 0
+wave9$hefet_main[wave9$hefet_main == -1] <- 0
+
+# Step 3: Remove rows with NA
+wave9 <- wave9[!is.na(wave9$hefet_main), ]
+
+# Step 4: Convert to numeric (retain 0–10 scale)
+wave9$hefet_main <- as.numeric(wave9$hefet_main)
+
+# Step 5: Check distribution
+table(wave9$hefet_main, useNA = "ifany")
+```
+
+# Whether had pain whilst walking
+```{r}
+# Step 2: Treat -1 as "No pain" (0)
+wave9$mmpain_main[wave9$mmpain_main == -1] <- 0
+
+# Step 3: Convert to binary: 1 = Yes, 0 = No
+wave9$mmpain_main <- ifelse(wave9$mmpain_main == 1, 1,
+                                  ifelse(wave9$mmpain_main == 2, 0, wave9$mmpain_main))
+
+# Step 4: Confirm result
+table(wave9$mmpain_main, useNA = "ifany")
+```
+
+# Mobility: difficulty walking 100 yards
+```{r}
+# Step 1: Set invalid/missing SPSS codes to NA
+wave9$hemobwa_main[wave9$hemobwa_main < 0] <- NA
+
+wave9 <- wave9[!is.na(wave9$hemobwa_main), ]
+
+# Step 2: Confirm cleaned variable
+table(wave9$hemobwa_main, useNA = "ifany")
+```
+
+# Mobility: difficulty sitting 2 hours -already clean-
+```{r}
+table(wave9$hemobsi_main, useNA = "ifany")
+```
+
+# Mobility: difficulty getting up from chair after sitting long periods
+```{r}
+# Step 1: Set invalid/missing SPSS codes to NA
+#wave9$hemobch_main[wave9$hemobch_main < 0] <- NA
+
+# Step 2: Remove rows with NA in hemobch_main
+#wave9 <- wave9[!is.na(wave9$hemobch_main), ]
+
+# Step 3: Confirm cleaned variable
+table(wave9$hemobch_main, useNA = "ifany")
+```
+
+# Mobility: difficulty climbing several flights stairs without resting
+```{r}
+table(wave9$hemobcs_main, useNA = "ifany")
+```
+
+```{r}
+table(wave9$headlwa_main, useNA = "ifany")
+```
+
+# Whether ever told had diabetes 
+```{r}
+# Step 1: Recode values
+wave9$heacd_main <- ifelse(wave9$heacd_main == 1, 1,  # Yes
+                           ifelse(wave9$heacd_main %in% c(2, -1), 0, NA))  
+# Step 2: Confirm recoding
+table(wave9$heacd_main, useNA = "ifany")
+
+# Step 3: Cross-tabulation with OA group
+tab <- table(wave9$heacd_main, wave9$heartoa_main)
+print(tab)
+
+# Step 4: Row-wise percentage
+prop_tab <- prop.table(tab, margin = 1)
+round(prop_tab * 100, 1)
+```
+
+# Self-rated health
+```{r}
+# Step 1: Recode -1 to 1 ("Not applicable" → "Excellent")
+wave9$hehelf_main[wave9$hehelf_main == -1] <- 1
+
+# Step 3: Convert to numeric
+wave9$hehelf_main <- as.numeric(wave9$hehelf_main)
+
+# Step 4: Drop rows with missing values
+wave9 <- wave9[!is.na(hehelf_main)]
+
+# Step 5: Check distribution
+table(wave9$hehelf_main, wave9$heartoa_main, useNA = "ifany")
+```
+
+```{r}
+# Remove "_main", "_ifs", and "_nurse" suffixes from column names
+names(wave9) <- gsub("(_main|_ifs|_nurse)$", "", names(wave9))
+
+# Confirm changes
+head(names(wave9))
+```
+
+```{r}
+table(wave9$heartoa, useNA = "ifany")
+```
+
+```{r}
+colnames(wave9)
+```
+
+```{r}
+#write.csv(wave9, "initial_dataset.csv", row.names = FALSE)
+```
+
+
+# End of this .rmd
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

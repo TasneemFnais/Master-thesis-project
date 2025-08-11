@@ -1,0 +1,404 @@
+---
+title: "Top-K Feature Selection and Reduced Model"
+subtitle: "Permutation Importance → 1-SE Rule → Reduced Logistic Regression"
+author: "Tesneem Fnais"
+date: "2025-07-29"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE}
+# ================== Packages ==================
+library(caret)
+library(dplyr)
+library(tidyr)
+library(vip)        # vi_permute()
+library(yardstick)  # roc_auc_vec
+library(pROC)       # AUC
+library(ggplot2)
+set.seed(2025)
+```
+
+
+```{r}
+# ================== 1) Load data ==================
+train_df <- read.csv("train_data_final.csv")
+test_df  <- read.csv("test_data_final.csv")
+
+OUTCOME   <- "heartoa"
+POS_CLASS <- "OA"  
+
+# Ensure outcome is a factor and make the POSITIVE class the FIRST level
+train_df[[OUTCOME]] <- factor(train_df[[OUTCOME]])
+test_df[[OUTCOME]]  <- factor(test_df[[OUTCOME]], levels = levels(train_df[[OUTCOME]]))
+
+if (levels(train_df[[OUTCOME]])[1] != POS_CLASS) {
+  train_df[[OUTCOME]] <- relevel(train_df[[OUTCOME]], ref = POS_CLASS)
+  test_df[[OUTCOME]]  <- factor(test_df[[OUTCOME]], levels = levels(train_df[[OUTCOME]]))
+}
+cat("Outcome levels (first is positive):\n"); print(levels(train_df[[OUTCOME]]))
+```
+
+
+```{r}
+# ================== 2) CV folds on TRAIN only ==================
+folds <- caret::createFolds(train_df[[OUTCOME]], k = 10, returnTrain = TRUE)
+
+# Prediction wrapper for vip::vi_permute — returns prob for POS_CLASS
+pred_fun <- function(object, newdata) {
+  predict(object, newdata, type = "prob")[, POS_CLASS]
+}
+
+# Yardstick AUC metric wrapper (bigger is better)
+auc_metric <- function(truth, estimate) {
+  yardstick::roc_auc_vec(truth = truth, estimate = estimate, event_level = "first")
+}
+
+# Upsample TRAIN only 
+upsample_train <- function(df, outcome) {
+  caret::upSample(
+    x = df %>% select(-all_of(outcome)),
+    y = df[[outcome]],
+    yname = outcome
+  )
+}
+
+# Check number of OA cases per validation fold
+table_per_fold <- sapply(seq_along(folds), function(i){
+  val_idx <- setdiff(seq_len(nrow(train_df)), folds[[i]])
+  table(train_df[[OUTCOME]][val_idx])[POS_CLASS]
+})
+table_per_fold  # number of OA cases per validation fold
+```
+
+
+```{r}
+# ============ 3) Permutation importance across folds (TRAIN only) ============
+# For each fold:
+# - Upsample the TRAIN split
+# - Fit LR on upsampled TRAIN (classProbs=TRUE)
+# - Compute permutation importance on the untouched VALIDATION split
+perm_results <- lapply(seq_along(folds), function(i) {
+  tr_idx  <- folds[[i]]
+  val_idx <- setdiff(seq_len(nrow(train_df)), tr_idx)
+
+  train_i <- train_df[tr_idx, ]
+  valid_i <- train_df[val_idx, ]
+
+  # Upsample TRAIN ONLY inside the fold
+  train_up <- upsample_train(train_i, OUTCOME)
+
+  # Fit logistic regression
+  ctrl_i <- trainControl(classProbs = TRUE, summaryFunction = twoClassSummary)
+  fit_i <- caret::train(
+    reformulate(termlabels = setdiff(names(train_up), OUTCOME), response = OUTCOME),
+    data = train_up,
+    method = "glm", family = "binomial",
+    trControl = ctrl_i, metric = "ROC"
+  )
+
+  X_val <- valid_i %>% select(-all_of(OUTCOME))
+  y_val <- valid_i[[OUTCOME]]
+
+  vip::vi_permute(
+    object            = fit_i,
+    feature_names     = colnames(X_val),
+    train             = X_val,
+    target            = y_val,
+    metric            = auc_metric,       # yardstick metric function
+    smaller_is_better = FALSE,            # larger AUC is better
+    pred_wrapper      = pred_fun,
+    nsim              = 10,               # permutations per feature per fold (increase for more stability)
+    keep              = TRUE
+  ) %>%
+    mutate(fold = i)
+})
+
+perm_long <- bind_rows(perm_results)  # columns: Variable, Importance (AUC drop), fold
+```
+
+
+```{r}
+# ================== 4) Variable-level importance ==================
+# If predictors were one-hot encoded (e.g., "hepaa.L", "hepaa.C"),
+# collapse them back to a variable-level score: "hepaa".
+to_variable <- function(term) sub("\\..*$", "", term)
+
+perm_long <- perm_long %>%
+  mutate(variable = to_variable(Variable))
+
+perm_summary <- perm_long %>%
+  group_by(variable) %>%
+  summarise(
+    mean_auc_drop = mean(Importance, na.rm = TRUE),
+    sd_auc_drop   = sd(Importance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_auc_drop))
+
+cat("\nTop 20 variables by mean AUC drop (higher = more important):\n")
+print(head(perm_summary, 20))
+```
+
+
+```{r}
+# ================== 5) Choose K with the 1‑SE rule ==================
+Ks <- c(5, 10, 15, 20, 25)
+
+cv_ctrl <- trainControl(
+  method = "repeatedcv", number = 5, repeats = 3,
+  classProbs = TRUE, summaryFunction = twoClassSummary,
+  sampling = "up"  # upsample training portion inside CV automatically
+)
+
+topK_perf <- lapply(Ks, function(K) {
+  varsK <- perm_summary %>% slice_head(n = K) %>% pull(variable)
+
+  # If data is already one-hot, keep all dummy columns that start with the variable name + "."
+  # If data has factors, using the variable names is enough—glm will handle factors.
+  keep_colsK <- unique(unlist(lapply(varsK, function(v) {
+    c(v, grep(paste0("^", v, "\\."), names(train_df), value = TRUE))
+  })))
+  formK <- as.formula(paste(OUTCOME, "~", paste(keep_colsK, collapse = " + ")))
+
+  fitK <- caret::train(
+    formK, data = train_df,
+    method = "glm", family = "binomial",
+    trControl = cv_ctrl, metric = "ROC"
+  )
+
+  data.frame(
+    K = K,
+    meanROC = max(fitK$results$ROC),
+    SD = fitK$results$ROCSD[which.max(fitK$results$ROC)]
+  )
+})
+topK_perf <- bind_rows(topK_perf)
+
+# ----- FIXED: use Standard Error (SE), not SD, for the 1‑SE rule -----
+best_idx  <- which.max(topK_perf$meanROC)
+best_mean <- topK_perf$meanROC[best_idx]
+best_sd   <- topK_perf$SD[best_idx]
+
+# number of CV resamples used to compute meanROC/SD
+n_resamples <- if (!is.null(cv_ctrl$repeats)) cv_ctrl$number * cv_ctrl$repeats else cv_ctrl$number
+best_se <- best_sd / sqrt(n_resamples)
+
+threshold <- best_mean - best_se
+K_star    <- min(topK_perf$K[topK_perf$meanROC >= threshold])
+
+cat(sprintf("\nBest mean CV AUC = %.3f; 1-SE = %.3f; threshold = %.3f; chosen K* = %d\n",
+            best_mean, best_se, threshold, K_star))
+
+# build the plot object
+p1 <- ggplot(topK_perf, aes(x = K, y = meanROC)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_hline(yintercept = threshold, linetype = "dashed") +
+  geom_point(data = subset(topK_perf, K == K_star), size = 4) +
+  annotate("text", x = K_star, y = threshold, vjust = -1,
+           label = paste0("K*=", K_star, " (1-SE rule)")) +
+  labs(x = "K (number of top features)", y = "CV AUC (mean)",
+       title = "Choosing K with the 1-SE rule") +
+  theme_classic(base_size = 13)    # <- white background theme
+  # if you prefer to keep minimal: 
+  # + theme_minimal(base_size = 13) +
+  #   theme(panel.background = element_rect(fill = "white", colour = NA),
+  #         plot.background  = element_rect(fill = "white", colour = NA))
+
+# save with white background
+ggsave("k_selection.png", plot = p1, width = 7, height = 4.5, dpi = 300, bg = "white")
+```
+
+
+```{r}
+# ======= 6) Fit final reduced model on TRAIN; evaluate once on TEST =======
+vars_star <- perm_summary %>% slice_head(n = K_star) %>% pull(variable)
+keep_cols_star <- unique(unlist(lapply(vars_star, function(v) {
+  c(v, grep(paste0("^", v, "\\."), names(train_df), value = TRUE))
+})))
+form_star <- as.formula(paste(OUTCOME, "~", paste(keep_cols_star, collapse = " + ")))
+
+# Upsample the FULL training set for the final model
+train_up_full <- upsample_train(train_df, OUTCOME)
+
+final_reduced <- glm(form_star, data = train_up_full, family = binomial())
+
+# Evaluate on untouched test set
+test_prob <- predict(final_reduced, newdata = test_df, type = "response")
+auc_test  <- pROC::auc(response = test_df[[OUTCOME]], predictor = test_prob)
+
+cat(sprintf("\nFinal reduced model (K*=%d) — Test AUC = %.3f\n", K_star, as.numeric(auc_test)))
+```
+
+
+```{r}
+# =========== 7) (Optional) Plot top variables by perm importance ===========
+
+library(tibble)
+library(dplyr)
+library(ggplot2)
+
+top_n <- min(25, nrow(perm_summary))   # how many variables to plot (max 25)
+plot_df <- perm_summary %>% slice_head(n = top_n)
+
+# ---- 1) Map short names -> descriptive labels (edit as needed) ----
+label_map <- c(
+  hemobst   = "Difficulty stooping/kneeling",
+  sex       = "Sex",
+  hepaa     = "Pain severity (most of the time)",
+  hepawhi   = "Hip pain",
+  hepawkn   = "Knee pain",
+  age       = "Age",
+  headlsh   = "Difficulty shopping for groceries",
+  grip_mean = "Grip strength",
+  mmpain    = "Pain while walking",
+  hepawot   = "Pain elsewhere",
+  headldr   = "Difficulty dressing",
+  hemobsi   = "Difficulty sitting 2 hours",
+  hemobre   = "Difficulty reaching overhead",
+  hepawba   = "Back pain",
+  hepawfe   = "Foot pain",
+  hemobpi   = "Difficulty lifting 10 lbs",
+  headlba   = "Difficulty bathing",
+  hehelf    = "Self-rated general health",
+  hemobch   = "Difficulty getting up from chair",
+  hemobcl   = "difficulty climbing one flight stairs",
+  hemobwa   = "Difficulty walking 100 yards",
+  headlwc   = "Difficulty using the toilet",
+  headlbe   = "Difficulty getting in/out of bed",
+  hemobpu   = "Difficulty pushing objects",
+  hemobcs   = "difficulty climbing several flights"
+)
+
+# (Optional) See which variables don’t have a label yet
+setdiff(plot_df$variable, names(label_map))
+
+# ---- 2) Add a label column for plotting (falls back to original name if missing) ----
+plot_df <- plot_df %>%
+  mutate(Variable_Label = ifelse(variable %in% names(label_map),
+                                 label_map[variable],
+                                 variable))
+
+# ---- 3) Plot using the label column (data unchanged) ----
+p <- ggplot(plot_df, aes(x = reorder(Variable_Label, mean_auc_drop), y = mean_auc_drop)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Permutation importance",
+       x = "Variable", y = "Mean AUC drop") +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 11),
+    plot.margin = ggplot2::margin(t = 10, r = 20, b = 10, l = 20, unit = "pt")
+    # or: plot.margin = grid::unit(c(10, 20, 10, 20), "pt")
+  )
+
+ggsave("perm_importance_plot.png", plot = p, width = 8, height = 10, dpi = 300, bg = "white")
+```
+
+
+```{r}
+# ---- Load saved data ----
+train_data_LR <- readRDS("data/train_data_LR.rds")
+test_data_LR  <- readRDS("data/test_data_LR.rds")
+
+# Ensure outcome factor with OA as the event/first level
+train_data_LR$heartoa <- factor(train_data_LR$heartoa, levels = c("OA","no_OA"))
+test_data_LR$heartoa  <- factor(test_data_LR$heartoa,  levels = c("OA","no_OA"))
+
+# ---- Choose top-10 variables from permutation importance ----
+vars_top10 <- perm_summary %>% slice_head(n = 10) %>% pull(variable)
+
+# Keep only those + outcome
+train_red <- train_data_LR %>% dplyr::select(all_of(c(vars_top10, "heartoa")))
+test_red  <- test_data_LR  %>% dplyr::select(all_of(c(vars_top10, "heartoa")))
+
+# ---- Upsample training set ----
+set.seed(123)
+train_red_up <- caret::upSample(
+  x = train_red[, setdiff(names(train_red), "heartoa")],
+  y = train_red$heartoa,
+  yname = "heartoa"
+)
+train_red_up$heartoa <- factor(train_red_up$heartoa, levels = c("OA","no_OA"))
+
+# ---- 10-fold CV and train LR ----
+ctrl_red <- trainControl(method = "cv", number = 10,
+                         classProbs = TRUE, summaryFunction = twoClassSummary,
+                         savePredictions = "final")
+
+set.seed(123)
+model_red <- train(
+  heartoa ~ ., data = train_red_up,
+  method = "glm", family = "binomial",
+  trControl = ctrl_red, metric = "ROC"
+)
+
+# ---- Train AUC (CV mean) ----
+train_auc <- mean(model_red$resample$ROC)
+
+# ---- Predict on TEST ----
+probs_test <- predict(model_red, newdata = test_red, type = "prob")[, "OA"]
+
+# Threshold for classification
+thr <- 0.4
+pred_test <- factor(ifelse(probs_test >= thr, "OA", "no_OA"),
+                    levels = c("OA","no_OA"))
+
+# ---- Metrics on TEST ----
+truth <- test_red$heartoa
+cm <- confusionMatrix(pred_test, truth, positive = "OA")
+
+# Counts
+TP <- cm$table["OA","OA"]; TN <- cm$table["no_OA","no_OA"]
+FP <- cm$table["OA","no_OA"]; FN <- cm$table["no_OA","OA"]
+P  <- TP + FN; N <- TN + FP
+
+# Basic metrics
+sens <- cm$byClass["Sensitivity"]
+spec <- cm$byClass["Specificity"]
+prec <- cm$byClass["Pos Pred Value"]
+f1   <- cm$byClass["F1"]
+acc  <- cm$overall["Accuracy"]
+
+# AUC + 95% CI
+roc_obj <- pROC::roc(response = truth, predictor = probs_test, levels = c("no_OA","OA"))
+auc_test <- as.numeric(pROC::auc(roc_obj))
+ci_auc <- pROC::ci.auc(roc_obj)
+
+# Wilson 95% CIs
+ci_sens <- DescTools::BinomCI(TP, P, method = "wilson")[1, 2:3]
+ci_spec <- DescTools::BinomCI(TN, N, method = "wilson")[1, 2:3]
+ci_prec <- DescTools::BinomCI(TP, TP + FP, method = "wilson")[1, 2:3]
+ci_acc  <- DescTools::BinomCI(TP + TN, P + N, method = "wilson")[1, 2:3]
+
+# ---- Print metrics ----
+cat(" Reduced Logistic Regression (Top-10) @ Threshold =", thr, "\n")
+cat("----------------------------------------------------\n")
+cat("Train AUC (CV): ", sprintf("%.3f", train_auc), "\n")
+cat("Test AUC : ", sprintf("%.3f (95%% CI: %.3f–%.3f)", auc_test, ci_auc[1], ci_auc[3]), "\n")
+cat("Sensitivity (OA): ", sprintf("%.3f (95%% CI: %.3f–%.3f)", sens, ci_sens[1], ci_sens[2]), "\n")
+cat("Specificity     : ", sprintf("%.3f (95%% CI: %.3f–%.3f)", spec, ci_spec[1], ci_spec[2]), "\n")
+cat("Precision (PPV) : ", sprintf("%.3f (95%% CI: %.3f–%.3f)", prec, ci_prec[1], ci_prec[2]), "\n")
+cat("F1 Score (OA)   : ", sprintf("%.3f", f1), "\n")
+cat("Accuracy        : ", sprintf("%.3f (95%% CI: %.3f–%.3f)", acc, ci_acc[1], ci_acc[2]), "\n\n")
+cat("Confusion Matrix (rows = predicted, cols = true):\n")
+print(cm$table)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
