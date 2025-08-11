@@ -28,15 +28,15 @@ The project develops and evaluates machine learning models to predict osteoarthr
 - **Predictors:** 32 literature-based, non-invasive features (reduced to 25 after feature selection)
 
 ## Methods
-![Study Design & Machine Learning Workflow](results/plots/study_design_ml_workflow.png)
+![Study Design & Machine Learning Workflow](results/plots/study_design_and_machine_learning_workflow.png)
 - Data Source: ELSA Wave 9
 - Models: Logistic Regression, Random Forest, XGBoost, CatBoost
 - Feature Selection: Bivariate Analysis, Boruta, Variance Inflation Factor (VIF) for Multicollinearity, Spearman correlation
 - Evaluation: AUC, accuracy, presicion, recall, F1 score, confusion matrix, ROC curves
-![Experimental Setup](results/plots/experimental_setup.png)
+![Experimental Setup](results/plots/Experimental_setup.png)
 
 ## Key Findings
-![Performance Evaluation](results/plots/performance_evaluation.png)
+![Performance Evaluation](results/tables/performance_evaluation.png)
 - **Best-performing model:** Logistic Regression with upsampling (AUC: 0.755)
 - **Top 15 predictors:** Difficulty stooping/kneeling, sex, pain severity (most of the time), hip pain, knee pain, age, difficulty shopping for groceries, grip strength, pain while walking, pain elsewhere, difficulty dressing, difficulty sitting for 2 hours, difficulty reaching overhead, back pain, foot pain.
 
