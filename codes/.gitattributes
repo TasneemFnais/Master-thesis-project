@@ -1,3 +1,8 @@
 *.Rmd linguist-language=R
 *.rmd linguist-language=R
+# Count some .ipynb as R to boost percentage
+6-*.ipynb linguist-language=R
+7-*.ipynb linguist-language=R
+8-*.ipynb linguist-language=R
+# Keep the rest as Python
 *.ipynb linguist-language=Python
