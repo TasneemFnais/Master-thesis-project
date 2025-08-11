@@ -45,7 +45,7 @@ The methodological workflow included literature-guided feature selection, prepro
 ![Performance Evaluation](results/tables/performance%20evaluation.png)
 *Table 1: Performance of four optimal machine learning models for osteoarthritis prediction.*
 
-- **Best-performing model:** Logistic Regression with upsampling (AUC: 0.755)
+- **Best-performing model:** Logistic Regression with upsampling (AUC: 0.755), best for **high-sensitivity** detection of true OA cases.
 - **Top 15 predictors:** Difficulty stooping/kneeling, sex, pain severity (most of the time), hip pain, knee pain, age, difficulty shopping for groceries, grip strength, pain while walking, pain elsewhere, difficulty dressing, difficulty sitting for 2 hours, difficulty reaching overhead, back pain, foot pain.
 
 ## Potential Applications
